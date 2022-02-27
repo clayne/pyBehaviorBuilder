@@ -5,7 +5,7 @@
 ## Copyright (C) 2021 The Qt Company Ltd.
 ## Contact: http://www.qt.io/licensing/
 ##
-## This file is part of the Qt for Python examples of the Qt Toolkit.
+## This file is modified from Qt for Python examples of the Qt Toolkit.
 ##
 ## $QT_BEGIN_LICENSE:BSD$
 ## You may use this file under the terms of the BSD license as follows:
@@ -43,7 +43,7 @@
 import math
 import sys
 
-from PySide6.QtCore import (QLineF, QPointF, QRect, QRectF, QSize, QSizeF, Qt,QEventLoop,
+from PySide6.QtCore import (QLineF, QPointF, QRect, QRectF, QSize, QSizeF, Qt,QEventLoop, QTimer,
                             Signal,QObject,QEvent)
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetrics, QIcon, QIntValidator,
                            QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform, QCloseEvent)
@@ -60,9 +60,32 @@ import diagramscene_rc
 
 from BehaviorBuilder import BehaviorFile
 
+#Global event receiver/emitter object
+#Credits to stackoverflow user eyllanesc
+#https://stackoverflow.com/questions/55553660/how-to-emit-custom-events-to-the-event-loop-in-pyqt
+import functools
+
+@functools.lru_cache()
+class GlobalObject(QObject):
+    def __init__(self):
+        super().__init__()
+        self._events = {}
+
+    def addEventListener(self, name, func):
+        if name not in self._events:
+            self._events[name] = [func]
+        else:
+            self._events[name].append(func)
+
+    def dispatchEvent(self, name):
+        functions = self._events.get(name, [])
+        for func in functions:
+            QTimer.singleShot(0, func)
+
+
 class StatePopup(QWidget):
 
-    def __init__(self, parent, stateNameStr, stateAnimationStr, stateWildCardStr):
+    def __init__(self, parent, stateNameStr, stateAnimationStr, stateWildCardStr, stateIsStartState):
         super(StatePopup, self).__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setAttribute(Qt.WA_StyledBackground)
@@ -123,6 +146,14 @@ class StatePopup(QWidget):
         self.stateNameEdit.setText(self.stateNameStr)
         layout.addWidget(self.stateNameEdit)
 
+        self.isStarting = QCheckBox("This state is the default/starting state", self)
+        self.isStarting.setStyleSheet("color: white")
+        layout.addWidget(self.isStarting)
+        if stateIsStartState:
+            self.isStarting.setChecked(True)
+        else:
+            self.isStarting.setChecked(False)
+
         #Animation
         layout.addWidget(QLabel('Animation'))
         self.animationNameEdit = QLineEdit()
@@ -139,6 +170,10 @@ class StatePopup(QWidget):
         self.gameBryoAnimation.setStyleSheet("color: white")
         layout.addWidget(self.gameBryoAnimation)
 
+        self.isLooping = QCheckBox("Looping Animation", self)
+        self.isLooping.setStyleSheet("color: white")
+        layout.addWidget(self.isLooping)
+
         buttonBox = QDialogButtonBox(
             QDialogButtonBox.Ok|QDialogButtonBox.Cancel)
         layout.addWidget(buttonBox)
@@ -151,6 +186,8 @@ class StatePopup(QWidget):
         self.animationNameEdit.textChanged.connect(self.animationName)
         self.wildcardNameEdit.textChanged.connect(self.wildcardName)
         self.gameBryoAnimation.stateChanged.connect(self.isGamebryoAnimState)
+        self.isLooping.stateChanged.connect(self.isLoopingState)
+        self.isStarting.stateChanged.connect(self.isStartingState)
 
         self.setWindowTitle("State properties")
 
@@ -170,6 +207,18 @@ class StatePopup(QWidget):
         else:
             self.animationNameEdit.setText("animations\\animationName.hkx")
             self.animationNameEdit.setEnabled(True)
+            return False
+
+    def isLoopingState(self):
+        if self.isLooping.isChecked():
+            return True
+        else:
+            return False
+
+    def isStartingState(self):
+        if self.isStarting.isChecked():
+            return True
+        else:
             return False
 
     def stateName(self):
@@ -458,6 +507,8 @@ class StateItem(QGraphicsPolygonItem):
     stateAnimationStr="animations\\animationName.hkx"
     stateWildCardStr=""
     stateGamebryoAnim=False
+    stateIsLooping=False
+    stateIsStartState=False
 
     def __init__(self, diagram_type, contextMenu, parent=None, scene=None):
         super().__init__(parent, scene)
@@ -557,14 +608,24 @@ class StateItem(QGraphicsPolygonItem):
     def getStateName(self):
         return self.stateNameStr
 
+    def dispatchCheckUniques(self):
+        GlobalObject().dispatchEvent("checkUniqueSettings")
+
     def mouseDoubleClickEvent(self, event):
-        stateData = StatePopup(self, self.stateNameStr,  self.stateAnimationStr, self.stateWildCardStr)
+        stateData = StatePopup(self, self.stateNameStr,  self.stateAnimationStr, self.stateWildCardStr, self.stateIsStartState)
         stateData.setWindowFlag(Qt.WindowCloseButtonHint, False)
         if stateData.exec():
             self.stateNameStr=stateData.stateNameStr
             self.stateAnimationStr=stateData.stateAnimationStr
             self.stateWildCardStr=stateData.stateWildCardStr
             self.stateGamebryoAnim=stateData.isGamebryoAnimState()
+            self.stateIsLooping=stateData.isLoopingState()
+            self.stateIsStartState = stateData.isStartingState()
+            if self.stateIsStartState:
+                #ToDo, parse all other states and make sure only one start state.
+                #has to be in diagramscene
+                self.dispatchCheckUniques()
+
 
 class DiagramScene(QGraphicsScene):
     InsertItem, InsertLine, InsertText, MoveItem = range(4)
@@ -587,6 +648,24 @@ class DiagramScene(QGraphicsScene):
         self._my_text_color = Qt.black
         self._my_line_color = Qt.black
         self._my_font = QFont()
+
+        #Listen for unique-check event
+        GlobalObject().addEventListener("checkUniqueSettings", self.checkUniqueWidgetOptions)
+
+
+    def checkUniqueWidgetOptions(self):
+        print("Checking unique settings")
+        stateList=[] #name, stateIsStartState, item
+        for item in self.items():
+            if isinstance(item, StateItem):
+                stateList.append([item.stateNameStr, item.stateIsStartState, item])
+        
+        if sum([stateItem[1] for stateItem in stateList]) > 1:
+            #Too many start states
+            for stateItem in stateList:
+                stateItem[2].stateIsStartState=False
+            reportStr="Too many states are selected as starting/default state, disabling all. Re-select starting state for only one."
+            print(reportStr)
 
     def set_line_color(self, color):
         self._my_line_color = color
@@ -859,7 +938,6 @@ class MainWindow(QMainWindow):
         item_widget = QWidget()
         item_widget.setLayout(layout)
 
-
         self._tool_box = QToolBox()
         self._tool_box.setSizePolicy(QSizePolicy(QSizePolicy.Maximum, QSizePolicy.Ignored))
         self._tool_box.setMinimumWidth(item_widget.sizeHint().width())
@@ -893,7 +971,7 @@ class MainWindow(QMainWindow):
                 event=w.stateEventStr
                 connectionList.append( (state1,state2,event) )
 
-        #Export
+        #Create behavior file object
         bf = BehaviorFile()
 
         for name,animation_path,looping,gamebryoanim in stateList:
@@ -904,9 +982,14 @@ class MainWindow(QMainWindow):
             for stateStr, event in wildcardList:
                 bf.add_wildcard(stateStr=stateStr, event=event)
 
+        #Todo set starting state
+        #-----------------------
+        #Might need tweaks in the Behavior factory
+
+
+        #Export
         bf.export(fileName)
 
-        #print("DONE")
 
     def create_actions(self):
         self._to_front_action = QAction(

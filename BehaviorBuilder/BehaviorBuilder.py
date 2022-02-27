@@ -95,7 +95,7 @@ class BehaviorFile:
         self.object_counter+=1
         return "#{:04d}".format(self.object_counter)
     
-    def add_state(self, name, animation_path="placeholder", looping=False, gamebryoanim=False):
+    def add_state(self, name, animation_path="placeholder", looping=False, gamebryoanim=False, enterNotifyEvents="null",exitNotifyEvents="null"):
         #minimum for adding a state is a:
         #actual state hkbStateMachineStateInfo containing at least:
         #a generator hkbClipGenerator/BGSGamebryoSequenceGenerator
@@ -121,17 +121,57 @@ class BehaviorFile:
             generator = hkbClipGenerator(self,name,animation_path, looping=looping)
         else:
             generator = BGSGamebryoSequenceGenerator(self, nifAnimName=name)
+
+        #if enterNotifyEvents or exitNotifyEvents is not Null then a hkbStateMachineEventPropertyArray needs to be created
+        if enterNotifyEvents != "null":
+            enter_eventPropArray = hkbStateMachineEventPropertyArray(self,enterNotifyEvents)
+        else:
+            enter_eventPropArray="null"
+
+        if exitNotifyEvents != "null":
+            exit_eventPropArray = hkbStateMachineEventPropertyArray(self,exitNotifyEvents)
+        else:
+            exit_eventPropArray="null"
+
         #The state
         state = hkbStateMachineStateInfo(BehaviorFileObj=self, 
                                          generator=generator,
                                          transitions=transitions,
                                          name=name,
-                                         state_ID=self.nStates)
+                                         state_ID=self.nStates,
+                                         enterNotifyEvents=enter_eventPropArray,
+                                         exitNotifyEvents=exit_eventPropArray)
         #increment nStates and add this entry it to the state list
         self.nStates+=1
         self.list_of_states.append((state,generator,transitions,name))
-        log.warning("added state "+name+" to project")
+        log.warning("added state "+name+" with state ID "+str(state.stateIdx)+" to project")
     
+    def add_clip_trigger(self, state, event, relativeToEndOfClip=False, localTime=0.0):
+        #Add a trigger (send an event) during the clip (animation) being played in a state
+        assert isinstance(state, str)
+        assert isinstance(event,str)
+        assert isinstance(localTime,(float,int))
+        assert isinstance(relativeToEndOfClip,bool)
+
+        #Collect the state
+        for stateInfo, stateGenerator,stateTransitions, stateName in self.list_of_states:
+            if stateName == state:
+                break
+        else:
+            log.warning("add_clip_trigger error, state "+state+" doesnt exist")
+
+        #Create a clip trigger array for this state, or collect it if it already exists
+        clip_trigger = stateInfo.getOrCreateClipTriggerArray(self)
+
+        #Similarly, get or create the event id
+        event_ID = self.hkbBehaviorGraphStringData.getOrCreateEventID(BehaviorFileObj=self,event_name=event)
+
+        #Add a trigger to it
+        clip_trigger.add_trigger(localTime=localTime, EventID=event_ID, relativeToEndOfClip=relativeToEndOfClip)
+        #update the generator
+        stateGenerator.set_trigger(clip_trigger)
+        
+
     def connect_states(self, state1, state2, event):
         #Add a transition from state1 into state2 upon receiving event
         #updates the hkbStateMachineTransitionInfoArray of state1 by
@@ -159,8 +199,8 @@ class BehaviorFile:
         eventIndex=self.hkbBehaviorGraphStringData.getOrCreateEventID(BehaviorFileObj=self,event_name=event)
 
         #add_transition(self, eventId, toStateId, transition="null", condition="null", wildcard=False)
-        stateTransitions.add_transition(eventIdIdx=eventIndex,toStateIdIdx=stateInfo.stateIdx, transitionStr=self.blend_effect.tag)
-        log.warning("added a transition from "+state1+" to "+state2+" with event "+event)
+        stateTransitions.add_transition(eventIdIdx=eventIndex,toStateIdIdx=stateInfo2.stateIdx, transitionStr=self.blend_effect.tag)
+        log.warning("added a transition from "+state1+" to "+state2+" (ID "+str(stateInfo2.stateIdx)+") with event "+event)
         
     
     def add_wildcard(self, stateStr, event):
@@ -680,6 +720,9 @@ class hkbClipGenerator:
         self.hkobject.append(ET.Comment(' ignoreStartTime SERIALIZE_IGNORED '))
         self.hkobject.append(ET.Comment(' pingPongBackward SERIALIZE_IGNORED '))
 
+    def set_trigger(self,trigger):
+        assert (trigger.__class__.__name__ == "hkbClipTriggerArray")
+        self.triggers.text=trigger.tag
 
 
 class BGSGamebryoSequenceGenerator:
@@ -741,6 +784,8 @@ class hkbStateMachineStateInfo:
     stateName="MISSING"
     tag="MISSING"
     hkobject=None
+    hkbClipTriggerArray=None
+
     def __init__(self, BehaviorFileObj, generator, transitions,  name, state_ID, enterNotifyEvents="null",exitNotifyEvents="null"):
         assert BehaviorFileObj.__class__.__name__=="BehaviorFile"
         assert (generator.__class__.__name__=="hkbClipGenerator" or generator.__class__.__name__=="BGSGamebryoSequenceGenerator")
@@ -810,6 +855,57 @@ class hkbStateMachineStateInfo:
         self.enable.set("name", "enable")
         self.enable.text="true"
 
+    def getOrCreateClipTriggerArray(self, BehaviorFileObj):
+        if self.hkbClipTriggerArray is None:
+            self.hkbClipTriggerArray=hkbClipTriggerArray(BehaviorFileObj)
+        return self.hkbClipTriggerArray
+
+class hkbStateMachineEventPropertyArray:
+    tag="MISSING"
+    hkobject=None
+    num_elements=0
+    eventsParam=None
+
+    def __init__(self, BehaviorFileObj, events=[]):
+        assert isinstance(events, (list,str))
+        print(events)
+        #header
+        self.hkobject = ET.SubElement(BehaviorFileObj.data,'hkobject')
+        self.tag=BehaviorFileObj._OCnext()
+        self.hkobject.set('name',self.tag)
+        self.hkobject.set('class', 'hkbStateMachineEventPropertyArray')
+        self.hkobject.set('signature',"0xb07b4388")
+
+        #comments
+        self.hkobject.append(ET.Comment(' memSizeAndFlags SERIALIZE_IGNORED '))
+        self.hkobject.append(ET.Comment(' referenceCount SERIALIZE_IGNORED '))
+
+        #add base hkparam containing the events
+        self.eventsParam = ET.SubElement(self.hkobject,'hkparam')
+        self.eventsParam.set("name","events")
+        #Check how many events
+        if isinstance(events,list):
+            self.num_elements=len(events)
+        else:
+            self.num_elements=1
+            events=[events]
+
+        self.eventsParam.set("numelements",str(self.num_elements))
+
+        #Add them
+        for idx in range(0,self.num_elements):
+            #get or create the event name
+            eventID = BehaviorFileObj.hkbBehaviorGraphStringData.getOrCreateEventID(BehaviorFileObj=BehaviorFileObj,event_name=events[idx])
+            #create event object
+            event_object = ET.SubElement(self.eventsParam,'hkobject')
+            #create event id param in event object
+            event_object_id = ET.SubElement(event_object, 'hkparam')
+            event_object_id.set("name","id")
+            event_object_id.text=str(eventID)
+            #create payload param in event object
+            event_object_payload = ET.SubElement(event_object, 'hkparam')
+            event_object_payload.set("name","payload")
+            event_object_payload.text="null"
 
 
 class hkbClipTriggerArray:
@@ -833,16 +929,16 @@ class hkbClipTriggerArray:
         #the triggers container
         self.triggersParam = ET.SubElement(self.hkobject,'hkparam')
         self.triggersParam.set("name","triggers")
-        self.triggersParam.set("numelements",str(numelements))
+        self.triggersParam.set("numelements",str(self.num_elements))
         
-    def add_trigger(self, localTime, EventID):
+    def add_trigger(self, localTime, EventID, relativeToEndOfClip=False):
         assert isinstance(localTime,(float,int))
         assert isinstance(EventID,int)
         triggersObj=ET.SubElement(self.triggersParam,'hkobject')
         #localTime
-        localTime = ET.SubElement(triggersObj,'hkparam')
-        localTime.set("name","localTime")
-        localTime.text="{:.06f}".format(localTime)
+        localTimeParam = ET.SubElement(triggersObj,'hkparam')
+        localTimeParam.set("name","localTime")
+        localTimeParam.text="{:.06f}".format(float(localTime))
         #eventParam
         eventParam=ET.SubElement(triggersObj,'hkparam')
         eventParam.set("name","event")
@@ -858,9 +954,12 @@ class hkbClipTriggerArray:
         payload.text="null"
         
         #relativeToEndOfClip
-        relativeToEndOfClip=ET.SubElement(triggersObj,'hkparam')
-        relativeToEndOfClip.set("name","relativeToEndOfClip")
-        relativeToEndOfClip.text="false"
+        relativeToEndOfClipObj=ET.SubElement(triggersObj,'hkparam')
+        relativeToEndOfClipObj.set("name","relativeToEndOfClip")
+        if relativeToEndOfClip:
+            relativeToEndOfClipObj.text="true"
+        else:
+            relativeToEndOfClipObj.text="false"
         #acyclic
         acyclic=ET.SubElement(triggersObj,'hkparam')
         acyclic.set("name","acyclic")
@@ -881,6 +980,7 @@ class hkbStateMachine:
     name="MISSING"
     nStates=0
     list_of_states=[]
+
     def __init__(self,BehaviorFileObj, name="defaultNameBehavior", startStateIdIdx=0):
         assert isinstance(BehaviorFileObj,object)
         assert BehaviorFileObj.__class__.__name__=="BehaviorFile"
